@@ -265,27 +265,42 @@ def es_sub(redis_dsn, tables, namespace=None, ttl=3600*24*3):
     signal("session_rollback").connect(session_rollback_hook, weak=False)
 
 
+class ZmqEventPublisher(object):
+    CTX = zmq.Context()
+
+    def __init__(self, bind, forwarder=False):
+        self.pub_socket = self.CTX.socket(zmq.PUB)
+
+        if forwarder:
+            self.pub_socket.connect(bind)
+        else:
+            self.pub_socket.bind(bind)
+
+    def send_event(self, name, value):
+        self.pub_socket.send_string("%s %s" % (name, value))
+
+
 def zmq_sub(bind, tables, forwarder=False):
     """0mq fanout subscriber.
 
     This subscriber will use zeromq to publish the event to outside.
     """
+
+    zmq_publisher = ZmqEventPublisher(bind, forwarder)
+    zmq_sub_sqlalchemy_event(zmq_publisher, tables)
+
+    return zmq_publisher
+
+
+def zmq_sub_sqlalchemy_event(zmq_publisher, tables):
     logger = logging.getLogger("meepo.sub.nano_sub")
-
-    ctx = zmq.Context()
-    pub_socket = ctx.socket(zmq.PUB)
-
-    if forwarder:
-        pub_socket.connect(bind)
-    else:
-        pub_socket.bind(bind)
 
     def _sub(table):
         for action in ("write", "update", "delete"):
             def _sub(pk, action=action):
-                msg = "%s_%s %s" % (table, action, pk)
-                pub_socket.send_string(msg)
-                logger.debug("pub msg: %s" % msg)
+                event_name = "%s_%s" % (table, action)
+                zmq_publisher.send_event(event_name, pk)
+                logger.debug("pub msg: %s" % "%s %s" % (event_name, pk))
             signal("%s_%s" % (table, action)).connect(_sub, weak=False)
 
     for table in set(tables):
